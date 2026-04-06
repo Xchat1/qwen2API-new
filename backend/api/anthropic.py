@@ -3,6 +3,7 @@ from fastapi.responses import StreamingResponse
 import json
 import logging
 import asyncio
+import uuid
 from backend.services.qwen_client import QwenClient
 from backend.services.token_calc import calculate_usage
 from backend.services.prompt_builder import build_prompt_with_tools
