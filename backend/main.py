@@ -56,6 +56,14 @@ app.include_router(embeddings.router, prefix="/v1", tags=["Embeddings"])
 app.include_router(probes.router, tags=["Probes"])
 app.include_router(admin.router, prefix="/api/admin", tags=["Dashboard Admin"])
 
+@app.get("/", tags=["System"])
+async def root():
+    return {
+        "status": "qwen2API Enterprise Gateway is running",
+        "docs": "/docs",
+        "version": "2.0.0"
+    }
+
 if __name__ == "__main__":
     import uvicorn
     uvicorn.run("backend.main:app", host="0.0.0.0", port=settings.PORT, workers=1)
