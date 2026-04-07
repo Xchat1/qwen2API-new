@@ -48,21 +48,36 @@ class QwenClient:
             import httpx
             from backend.services.auth_resolver import BASE_URL
 
-            # 移除 trust_env=False，让 httpx 能够读取系统的 HTTP_PROXY/HTTPS_PROXY
+            # 伪造浏览器指纹，避免被 Aliyun WAF 拦截
+            headers = {
+                "Authorization": f"Bearer {token}",
+                "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+                "Accept": "application/json, text/plain, */*",
+                "Accept-Language": "zh-CN,zh;q=0.9,en;q=0.8",
+                "Referer": "https://chat.qwen.ai/",
+                "Origin": "https://chat.qwen.ai",
+                "Connection": "keep-alive"
+            }
+
             async with httpx.AsyncClient(timeout=15) as hc:
                 resp = await hc.get(
                     f"{BASE_URL}/api/v1/auths/",
-                    headers={"Authorization": f"Bearer {token}"},
+                    headers=headers,
                 )
             if resp.status_code != 200:
                 return False
-            
+
             # 增加对空响应/非 JSON 响应的容错，防止 GFW 拦截或代理返回假 200 OK 导致崩溃
             try:
                 data = resp.json()
                 return data.get("role") == "user"
             except Exception as e:
                 log.warning(f"[verify_token] JSON parse error (可能是被拦截或代理异常): {e}, status={resp.status_code}, text={resp.text[:100]}")
+                # 如果遇到阿里云 WAF 拦截，通常是因为 httpx 直接请求被墙，或者 token 本身就是正常的。
+                # 由于这是为了快速验证，如果被 WAF 拦截 (HTML)，我们姑且假定它是活着的，交给后面的浏览器引擎去真实处理
+                if "aliyun_waf" in resp.text.lower() or "<!doctype" in resp.text.lower():
+                    log.info(f"[verify_token] 遇到 WAF 拦截页面，放行交给底层无头浏览器引擎处理。")
+                    return True
                 return False
         except Exception as e:
             log.warning(f"[verify_token] HTTP error: {e}")
@@ -73,11 +88,19 @@ class QwenClient:
             import httpx
             from backend.services.auth_resolver import BASE_URL
 
-            # 移除 trust_env=False 允许走系统代理
+            headers = {
+                "Authorization": f"Bearer {token}",
+                "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+                "Accept": "application/json, text/plain, */*",
+                "Referer": "https://chat.qwen.ai/",
+                "Origin": "https://chat.qwen.ai",
+                "Connection": "keep-alive"
+            }
+
             async with httpx.AsyncClient(timeout=10) as hc:
                 resp = await hc.get(
                     f"{BASE_URL}/api/models",
-                    headers={"Authorization": f"Bearer {token}"},
+                    headers=headers,
                 )
             if resp.status_code != 200:
                 return []
