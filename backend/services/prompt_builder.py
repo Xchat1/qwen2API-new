@@ -106,6 +106,13 @@ def build_prompt_with_tools(messages: list, tools: list) -> str:
             "",
             "Available tools:",
         ]
+        
+        # 强制包含完整的 System Prompt 作为工具背景说明
+        if system_text:
+            lines.insert(0, "=== SYSTEM BACKGROUND ===")
+            lines.insert(1, system_text.strip())
+            lines.insert(2, "=========================\n")
+
         verbose_tools = len(tools) <= 20
         for tool in tools:
             name = tool.get("name", "")
