@@ -73,45 +73,28 @@ def parse_tool_calls(answer: str, tools: list):
         blocks.append({"type": "tool_use", "id": tool_id, "name": name, "input": input_data})
         return blocks, "tool_use"
 
-    # 1. Primary: ✿ACTION✿...✿END_ACTION✿
-    tc_m = re.search(r'✿ACTION✿\s*(.*?)\s*✿END_ACTION✿', answer, re.DOTALL | re.IGNORECASE)
+    # 1. Primary: ##TOOL_CALL##...##END_CALL##
+    tc_m = re.search(r'##TOOL_CALL##\s*(.*?)\s*##END_CALL##', answer, re.DOTALL | re.IGNORECASE)
     if tc_m:
         raw_json = tc_m.group(1).strip()
         try:
             obj = json.loads(raw_json)
-            name = obj.get("action", obj.get("name", ""))
-            inp = obj.get("args", obj.get("input", obj.get("arguments", obj.get("parameters", {}))))
+            name = obj.get("name", "")
+            inp = obj.get("input", obj.get("args", obj.get("arguments", obj.get("parameters", {}))))
             if isinstance(inp, str):
                 try: inp = json.loads(inp)
                 except: inp = {"value": inp}
             prefix = answer[:tc_m.start()].strip()
-            log.info(f"[ToolParse] ✓ ✿ACTION✿ 格式: name={name!r}, input={str(inp)[:120]}")
+            log.info(f"[ToolParse] ✓ ##TOOL_CALL## 格式: name={name!r}, input={str(inp)[:120]}")
             return _make_tool_block(name, inp, prefix)
         except (json.JSONDecodeError, ValueError) as e:
-            log.warning(f"[ToolParse] ✿ACTION✿ 格式解析失败: {e}, 尝试提取 action 强制触发工具纠错机制")
-            name_m = re.search(r'"(?:action|name)"\s*:\s*"([^"]+)"', raw_json)
+            log.warning(f"[ToolParse] ##TOOL_CALL## 格式解析失败: {e}, 尝试提取 name 强制触发工具纠错机制")
+            name_m = re.search(r'"name"\s*:\s*"([^"]+)"', raw_json)
             name = name_m.group(1) if name_m else next(iter(tool_names)) if tool_names else "unknown"
             prefix = answer[:tc_m.start()].strip()
             # 返回一个含有故意报错信息的 input，迫使 Claude Code 拒绝并提醒 LLM 修复 JSON
             fake_input = {"_json_error": f"You generated invalid JSON (unescaped quotes or literal newlines). Error: {e}"}
             return _make_tool_block(name, fake_input, prefix)
-
-    # 1.5 Fallback for old ##TOOL_CALL##
-    tc_old = re.search(r'##TOOL_CALL##\s*(.*?)\s*##END_CALL##', answer, re.DOTALL | re.IGNORECASE)
-    if tc_old:
-        raw_json = tc_old.group(1).strip()
-        try:
-            obj = json.loads(raw_json)
-            name = obj.get("name", obj.get("action", ""))
-            inp = obj.get("input", obj.get("args", obj.get("arguments", obj.get("parameters", {}))))
-            if isinstance(inp, str):
-                try: inp = json.loads(inp)
-                except: inp = {"value": inp}
-            prefix = answer[:tc_old.start()].strip()
-            log.info(f"[ToolParse] ✓ ##TOOL_CALL## 格式: name={name!r}, input={str(inp)[:120]}")
-            return _make_tool_block(name, inp, prefix)
-        except (json.JSONDecodeError, ValueError) as e:
-            log.warning(f"[ToolParse] ##TOOL_CALL## 格式解析失败: {e}")
 
     # 2. XML: <tool_call>...</tool_call>
     xml_m = re.search(r'<tool_call>\s*(.*?)\s*</tool_call>', answer, re.DOTALL | re.IGNORECASE)
@@ -130,11 +113,11 @@ def parse_tool_calls(answer: str, tools: list):
             log.warning(f"[ToolParse] XML格式解析失败: {e}, content={xml_m.group(1)[:100]!r}")
 
     # 2.5 Code block: ```tool_call\n...\n```
-    cb_m = re.search(r'```(?:tool_call|action)\s*\n(.*?)\n```', answer, re.DOTALL)
+    cb_m = re.search(r'```tool_call\s*\n(.*?)\n```', answer, re.DOTALL)
     if cb_m:
         try:
             obj = json.loads(cb_m.group(1).strip())
-            name = obj.get("name", obj.get("action", ""))
+            name = obj.get("name", "")
             inp = obj.get("input", obj.get("args", {}))
             if isinstance(inp, str):
                 try: inp = json.loads(inp)
@@ -149,10 +132,10 @@ def parse_tool_calls(answer: str, tools: list):
     try:
         stripped_tmp = re.sub(r'```(?:json)?\s*\n?', '', answer)
         stripped_tmp = re.sub(r'\n?```', '', stripped_tmp).strip()
-        if stripped_tmp.startswith('{') and ('"name"' in stripped_tmp or '"action"' in stripped_tmp):
+        if stripped_tmp.startswith('{') and '"name"' in stripped_tmp:
             obj = json.loads(stripped_tmp)
-            if ("name" in obj or "action" in obj) and "type" not in obj:
-                name = obj.get("name", obj.get("action", ""))
+            if "name" in obj and "type" not in obj:
+                name = obj.get("name", "")
                 args = obj.get("arguments", obj.get("input", obj.get("parameters", {})))
                 if isinstance(args, str):
                     try: args = json.loads(args)
@@ -182,7 +165,7 @@ def parse_tool_calls(answer: str, tools: list):
     # 例如 Qwen 输出: "我将使用 Tool Read 来读取..." 或者 "Tool Glob does not exist"
     if answer.strip() and tools:
         lower_ans = answer.lower()
-        if "tool" in lower_ans or "✿action✿" in lower_ans or "action" in lower_ans:
+        if "tool" in lower_ans:
             log.warning(f"[ToolParse] 未匹配到正确格式，但检测到工具调用意图。强制阻断纯文本返回。")
             # 尝试在文本中寻找被提及的工具名
             fallback_name = None
@@ -193,7 +176,7 @@ def parse_tool_calls(answer: str, tools: list):
             if not fallback_name:
                 fallback_name = next(iter(tool_names)) if tool_names else "unknown"
             
-            return _make_tool_block(fallback_name, {"_error": "You MUST use ✿ACTION✿ syntax to call tools. Direct text or JSON is invalid. PLEASE RETRY."})
+            return _make_tool_block(fallback_name, {"_error": "You MUST use ##TOOL_CALL## syntax to call tools. Direct text or JSON is invalid. PLEASE RETRY."})
 
     log.warning(f"[ToolParse] ✗ 未检测到工具调用，作为普通文本返回。工具列表: {tool_names}")
     
@@ -203,12 +186,13 @@ def parse_tool_calls(answer: str, tools: list):
 
 def inject_format_reminder(prompt: str, tool_name: str) -> str:
     reminder = (
-        f"[CORRECTION]: You just tried to call '{tool_name}' using an INVALID FORMAT.\n"
-        f"You MUST use the `✿ACTION✿` syntax. Do NOT use JSON directly, do NOT use markdown code blocks like ```json.\n\n"
-        f"Example of CORRECT format:\n"
-        f"✿ACTION✿\n"
-        f'{{"action": "{tool_name}", "args": {{"key": "value"}}}}\n'
-        f"✿END_ACTION✿\n"
+        f"[CORRECTION]: You called '{tool_name}' using the WRONG format — "
+        f"the server BLOCKED it with 'Tool {tool_name} does not exists.'. "
+        f"You MUST use ##TOOL_CALL## format and NOTHING ELSE:\n"
+        f"##TOOL_CALL##\n"
+        f'{{"name": "{tool_name}", "input": {{...your args here...}}}}\n'
+        f"##END_CALL##\n"
+        f"DO NOT use JSON without delimiters. DO NOT use any XML tags. ONLY ##TOOL_CALL##.\n"
     )
     prompt = prompt.rstrip()
     if prompt.endswith("Assistant:"):

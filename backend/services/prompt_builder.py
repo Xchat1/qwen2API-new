@@ -20,7 +20,7 @@ def _extract_text(content, user_tool_mode: bool = False) -> str:
             elif t == "tool_use":
                 inp = json.dumps(part.get("input", {}), ensure_ascii=False)
                 other_parts.append(
-                    f'✿ACTION✿\n{{"action": {json.dumps(part.get("name",""))}, "args": {inp}}}\n✿END_ACTION✿'
+                    f'##TOOL_CALL##\n{{"name": {json.dumps(part.get("name",""))}, "input": {inp}}}\n##END_CALL##'
                 )
             elif t == "tool_result":
                 inner = part.get("content", "")
@@ -75,40 +75,37 @@ def build_prompt_with_tools(messages: list, tools: list) -> str:
     if tools:
         names = [t.get("name", "") for t in tools if t.get("name")]
         lines = [
-            "=== CRITICAL INSTRUCTIONS FOR TOOL EXECUTION ===",
-            "YOU MUST FORGET ALL PREVIOUS FUNCTION CALLING FORMATS.",
-            "DO NOT USE `<|tool_call|>` or any native JSON structure.",
-            "YOU CAN ONLY USE THE CUSTOM `✿ACTION✿` FORMAT DEFINED BELOW.",
-            f"Available actions: {', '.join(names)}",
+            "=== MANDATORY TOOL CALL INSTRUCTIONS ===",
+            "IGNORE any previous output format instructions (needs-review, recap, etc.).",
+            f"You have access to these tools: {', '.join(names)}",
             "",
-            "WHEN YOU DECIDE TO USE A TOOL, YOU MUST OUTPUT EXACTLY THIS FORMAT:",
-            "✿ACTION✿",
-            '{"action": "EXACT_ACTION_NAME", "args": {"param1": "value1"}}',
-            "✿END_ACTION✿",
+            "WHEN YOU NEED TO CALL A TOOL — output EXACTLY this format (nothing else):",
+            "##TOOL_CALL##",
+            '{"name": "EXACT_TOOL_NAME", "input": {"param1": "value1"}}',
+            "##END_CALL##",
             "",
-            "RULES:",
-            "1. You MUST use ✿ACTION✿ and ✿END_ACTION✿ tags.",
-            "2. Inside the tags, output ONLY valid JSON.",
-            "3. The JSON MUST have an 'action' key and an 'args' key.",
-            "4. DO NOT add any markdown formatting (like ```json) inside the tags.",
-            "5. After receiving a [Tool Result], analyze it and decide the next step.",
-            "6. Only provide a final answer when all necessary steps are completed.",
+            "MULTI-TURN RULES:",
+            "- After a [Tool Result] block appears in the conversation, read it and decide next action.",
+            "- If more tool calls are needed, emit another ##TOOL_CALL## block.",
+            "- Only give a final text answer when ALL needed information is gathered.",
+            "- Never skip calling a tool that is required to complete the user request.",
+            "- The history shows ##TOOL_CALL## blocks you already made and their [Tool Result] responses.",
             "",
-            "CRITICALLY FORBIDDEN FORMATS (USING THESE WILL CAUSE FATAL ERRORS):",
-            '- {"name": "X", "arguments": "..."}',
-            '- {"type": "function", "name": "X"}',
-            '- {"type": "tool_use", "name": "X"}',
-            "- ##TOOL_CALL##",
-            "If you use any of the above forbidden formats, the system will crash.",
+            "STRICT RULES:",
+            "- No preamble, no explanation before or after ##TOOL_CALL##...##END_CALL##.",
+            "- Use EXACT tool name from the list below.",
+            "- When NO tool is needed, answer normally in plain text.",
             "",
-            "Tool Descriptions:",
+            "CRITICAL — FORBIDDEN FORMATS (will be INTERCEPTED and BLOCKED by server):",
+            '- {"name": "X", "arguments": "..."}  <-- NEVER USE',
+            '- {"type": "function", "name": "X"}  <-- NEVER USE',
+            '- {"type": "tool_use", "name": "X"}  <-- NEVER USE',
+            "- <function_calls><invoke name=\"X\">  <-- NEVER USE",
+            "- <tool_call>{...}</tool_call>  <-- NEVER USE",
+            "ONLY ##TOOL_CALL##...##END_CALL## is accepted. Any other format will cause 'Tool X does not exists.' error.",
+            "",
+            "Available tools:",
         ]
-
-        # 强制包含完整的 System Prompt 作为工具背景说明
-        if system_text:
-            lines.insert(0, "=== SYSTEM BACKGROUND ===")
-            lines.insert(1, system_text.strip())
-            lines.insert(2, "=========================\n")
 
         verbose_tools = len(tools) <= 20
         for tool in tools:
@@ -155,8 +152,8 @@ def build_prompt_with_tools(messages: list, tools: list) -> str:
                 )
             elif not isinstance(tool_content, str):
                 tool_content = str(tool_content)
-            if len(tool_content) > 100000:
-                tool_content = tool_content[:100000] + "...[truncated]"
+            if len(tool_content) > 1500:
+                tool_content = tool_content[:1500] + "...[truncated]"
             line = f"[Tool Result]{(' id=' + tool_call_id) if tool_call_id else ''}\n{tool_content}\n[/Tool Result]"
             if used + len(line) + 2 > budget and history_parts:
                 break
@@ -181,7 +178,7 @@ def build_prompt_with_tools(messages: list, tools: list) -> str:
                 except (json.JSONDecodeError, ValueError):
                     args = {"raw": args_str}
                 tc_parts.append(
-                    f'✿ACTION✿\n{{"action": {json.dumps(name)}, "args": {json.dumps(args, ensure_ascii=False)}}}\n✿END_ACTION✿'
+                    f'##TOOL_CALL##\n{{"name": {json.dumps(name)}, "input": {json.dumps(args, ensure_ascii=False)}}}\n##END_CALL##'
                 )
             text = "\n\n".join(tc_parts)
 
@@ -191,7 +188,7 @@ def build_prompt_with_tools(messages: list, tools: list) -> str:
             
         is_tool_result = role == "user" and ("[Tool Result]" in text or "[tool result]" in text.lower()
                                               or text.startswith("{") or "\"results\"" in text[:100])
-        max_len = 100000 if is_tool_result else 200000
+        max_len = 1500 if is_tool_result else 8000
         if len(text) > max_len:
             text = text[:max_len] + "...[truncated]"
         prefix = {"user": "Human: ", "assistant": "Assistant: ", "system": "System: "}.get(role, "")

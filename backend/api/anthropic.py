@@ -134,12 +134,29 @@ async def anthropic_messages(request: Request):
                             inp = json.loads(tc["args"]) if tc["args"] else {}
                         except (json.JSONDecodeError, ValueError):
                             inp = {"raw": tc["args"]}
-                        tc_parts.append(f'✿ACTION✿\n{{"action": {json.dumps(name)}, "args": {json.dumps(inp, ensure_ascii=False)}}}\n✿END_ACTION✿')
+                        tc_parts.append(f'##TOOL_CALL##\n{{"name": {json.dumps(name)}, "input": {json.dumps(inp, ensure_ascii=False)}}}\n##END_CALL##')
                     
                     if not answer_text:
                         answer_text = "\n\n".join(tc_parts)
                     else:
                         answer_text += "\n\n" + "\n\n".join(tc_parts)
+
+                # Detect Qwen native tool call interception
+                import re
+                native_blocked_m = re.search(r'Tool (\w+) does not exists?\.?', answer_text.strip(), re.IGNORECASE)
+                if native_blocked_m and tools and stream_attempt < 4:
+                    blocked_name = native_blocked_m.group(1)
+                    if acc:
+                        client.account_pool.release(acc)
+                        if chat_id:
+                            import asyncio
+                            asyncio.create_task(client.delete_chat(acc.token, chat_id))
+                    log.warning(f"[NativeBlock-ANT] Qwen拦截原生工具调用 '{blocked_name}'，重试 (attempt {stream_attempt+1}/5)")
+                    from backend.services.tool_parser import inject_format_reminder
+                    current_prompt = inject_format_reminder(current_prompt, blocked_name)
+                    import asyncio
+                    await asyncio.sleep(0.5)
+                    continue
 
                 # Parse tools
                 from backend.services.tool_parser import parse_tool_calls
