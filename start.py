@@ -96,6 +96,36 @@ def start_frontend() -> subprocess.Popen:
     return proc
 
 
+def kill_port(port: int):
+    """Kill any process occupying the given port."""
+    try:
+        if os.name == "nt":
+            result = subprocess.run(
+                ["netstat", "-ano", "-p", "TCP"],
+                capture_output=True, text=True, timeout=5
+            )
+            for line in result.stdout.splitlines():
+                if f":{port} " in line and "LISTENING" in line:
+                    pid = line.strip().split()[-1]
+                    if pid.isdigit():
+                        subprocess.run(["taskkill", "/F", "/PID", pid], capture_output=True)
+                        print(f"  -> 已终止占用 {port} 端口的旧进程 (PID: {pid})")
+                        time.sleep(1)
+                        return
+        else:
+            result = subprocess.run(
+                ["lsof", "-ti", f"tcp:{port}"],
+                capture_output=True, text=True, timeout=5
+            )
+            pid = result.stdout.strip()
+            if pid:
+                subprocess.run(["kill", "-9", pid], capture_output=True)
+                print(f"  -> 已终止占用 {port} 端口的旧进程 (PID: {pid})")
+                time.sleep(1)
+    except Exception:
+        pass
+
+
 def start_backend() -> subprocess.Popen:
     print("⚡ [4/4] 启动后端服务...")
     env = os.environ.copy()
@@ -104,6 +134,7 @@ def start_backend() -> subprocess.Popen:
     env["PYTHONUTF8"] = "1"
 
     port = env.get("PORT", "7860")
+    kill_port(int(port))
 
     proc = subprocess.Popen(
         [
