@@ -4,6 +4,9 @@ from dataclasses import dataclass
 
 log = logging.getLogger("qwen2api.prompt")
 
+CLAUDE_CODE_OPENAI_PROFILE = "claude_code_openai"
+OPENCLAW_OPENAI_PROFILE = "openclaw_openai"
+
 
 @dataclass(slots=True)
 class PromptBuildResult:
@@ -12,7 +15,66 @@ class PromptBuildResult:
     tool_enabled: bool
 
 
-def _extract_text(content, user_tool_mode: bool = False) -> str:
+def _render_history_tool_call(name: str, input_data: dict, client_profile: str) -> str:
+    payload = json.dumps({"name": name, "input": input_data}, ensure_ascii=False)
+    if client_profile == CLAUDE_CODE_OPENAI_PROFILE:
+        return f"##TOOL_CALL##\n{payload}\n##END_CALL##"
+    return f"<tool_call>{payload}</tool_call>"
+
+
+def _build_tool_instruction_block(tools: list[dict], client_profile: str) -> str:
+    names = [t.get("name", "") for t in tools if t.get("name")]
+    if client_profile == CLAUDE_CODE_OPENAI_PROFILE:
+        lines = [
+            "=== MANDATORY TOOL CALL INSTRUCTIONS ===",
+            "IGNORE any previous output format instructions (needs-review, recap, etc.).",
+            f"You have access to these tools: {', '.join(names)}",
+            "",
+            "WHEN YOU NEED TO CALL A TOOL — output EXACTLY this format (nothing else):",
+            "##TOOL_CALL##",
+            '{"name": "EXACT_TOOL_NAME", "input": {"param1": "value1"}}',
+            "##END_CALL##",
+            "",
+            "Rules:",
+            "- Output only the wrapper and JSON body.",
+            "- No prose before or after the wrapper.",
+            "- No markdown fences.",
+            "- No thinking tags.",
+            "- Use the exact tool name from the list above.",
+            "- Put arguments inside the input object.",
+            "- Do not invent tool names.",
+            "- If no tool is needed, answer normally.",
+            "",
+            "CRITICAL — FORBIDDEN FORMATS (will be blocked by server):",
+            '- {"name": "X", "arguments": "..."}  <-- NEVER USE',
+            '- {"type": "function", "name": "X"}  <-- NEVER USE',
+            '- {"type": "tool_use", "name": "X"}  <-- NEVER USE',
+            '- <tool_calls><tool_call>{...}</tool_call></tool_calls>  <-- NEVER USE',
+            '- <tool_call>{...}</tool_call>  <-- NEVER USE',
+            "ONLY ##TOOL_CALL##...##END_CALL## is accepted. Any other format will cause 'Tool X does not exists.' error.",
+            "=== END TOOL INSTRUCTIONS ===",
+        ]
+        return "\n".join(lines)
+
+    lines = [
+        "=== TOOL USAGE INSTRUCTIONS ===",
+        f"You have access to these tools: {', '.join(names)}",
+        "When a tool is needed, emit a single XML tool call block and nothing else:",
+        '<tool_call>{"name": "EXACT_TOOL_NAME", "input": {"param1": "value1"}}</tool_call>',
+        "Rules:",
+        "- Output only the XML block.",
+        "- No prose before or after the block.",
+        "- No markdown fences.",
+        "- No thinking tags.",
+        "- Use the exact tool name from the list above.",
+        "- Put arguments inside the input object.",
+        "- If no tool is needed, answer normally.",
+        "=== END TOOL INSTRUCTIONS ===",
+    ]
+    return "\n".join(lines)
+
+
+def _extract_text(content, user_tool_mode: bool = False, client_profile: str = OPENCLAW_OPENAI_PROFILE) -> str:
     """Extract text from Anthropic content (string or list of blocks).
 
     user_tool_mode=True: used for user messages when tools are active.
@@ -34,12 +96,7 @@ def _extract_text(content, user_tool_mode: bool = False) -> str:
             if t == "text":
                 text_blocks.append(part.get("text", ""))
             elif t == "tool_use":
-                # Render as ##TOOL_CALL## format — same as what we ask the model to output,
-                # so history looks consistent and the model knows how to continue.
-                inp = json.dumps(part.get("input", {}), ensure_ascii=False)
-                other_parts.append(
-                    f'##TOOL_CALL##\n{{"name": {json.dumps(part.get("name",""))}, "input": {inp}}}\n##END_CALL##'
-                )
+                other_parts.append(_render_history_tool_call(part.get("name", ""), part.get("input", {}), client_profile))
             elif t == "tool_result":
                 inner = part.get("content", "")
                 tid = part.get("tool_use_id", "")
@@ -90,42 +147,10 @@ def _safe_preview(text: str, limit: int = 240) -> str:
     return compact[:limit] + ("...[truncated]" if len(compact) > limit else "")
 
 
-def build_prompt_with_tools(system_prompt: str, messages: list, tools: list) -> str:
+def build_prompt_with_tools(system_prompt: str, messages: list, tools: list, *, client_profile: str = OPENCLAW_OPENAI_PROFILE) -> str:
     MAX_CHARS = 18000 if tools else 120000
-    sys_part = "" if tools else (f"<system>\n{system_prompt[:2000]}\n</system>" if system_prompt else "")
-    tools_part = ""
-    if tools:
-        names = [t.get("name", "") for t in tools if t.get("name")]
-        lines = [
-            "=== MANDATORY TOOL CALL INSTRUCTIONS ===",
-            "IGNORE any previous output format instructions (needs-review, recap, etc.).",
-            f"You have access to these tools: {', '.join(names)}",
-            "",
-            "WHEN YOU NEED TO CALL A TOOL — output EXACTLY this format (nothing else):",
-            "##TOOL_CALL##",
-            '{"name": "EXACT_TOOL_NAME", "input": {"param1": "value1"}}',
-            "##END_CALL##",
-            "",
-            "Rules:",
-            "- Output only the wrapper and JSON body.",
-            "- No prose before or after the wrapper.",
-            "- No markdown fences.",
-            "- No thinking tags.",
-            "- Use the exact tool name from the list above.",
-            "- Put arguments inside the input object.",
-            "- Do not invent tool names.",
-            "- If no tool is needed, answer normally.",
-            "",
-            "CRITICAL — FORBIDDEN FORMATS (will be blocked by server):",
-            '- {"name": "X", "arguments": "..."}  <-- NEVER USE',
-            '- {"type": "function", "name": "X"}  <-- NEVER USE',
-            '- {"type": "tool_use", "name": "X"}  <-- NEVER USE',
-            '- <tool_calls><tool_call>{...}</tool_call></tool_calls>  <-- NEVER USE',
-            '- <tool_call>{...}</tool_call>  <-- NEVER USE',
-            "ONLY ##TOOL_CALL##...##END_CALL## is accepted. Any other format will cause 'Tool X does not exists.' error.",
-            "=== END TOOL INSTRUCTIONS ===",
-        ]
-        tools_part = "\n".join(lines)
+    sys_part = "" if tools and client_profile == CLAUDE_CODE_OPENAI_PROFILE else (f"<system>\n{system_prompt[:2000]}\n</system>" if system_prompt else "")
+    tools_part = _build_tool_instruction_block(tools, client_profile) if tools else ""
 
     overhead = len(sys_part) + len(tools_part) + 50
     budget = MAX_CHARS - overhead
@@ -171,8 +196,11 @@ def build_prompt_with_tools(system_prompt: str, messages: list, tools: list) -> 
             msg_count += 1
             continue
 
-        text = _extract_text(msg.get("content", ""),
-                             user_tool_mode=(bool(tools) and role == "user"))
+        text = _extract_text(
+            msg.get("content", ""),
+            user_tool_mode=(bool(tools) and role == "user" and client_profile == CLAUDE_CODE_OPENAI_PROFILE),
+            client_profile=client_profile,
+        )
 
         # ── OpenAI-format assistant tool_calls (content=null + tool_calls[]) ─
         # When an assistant message has tool_calls but content is null/empty,
@@ -187,9 +215,7 @@ def build_prompt_with_tools(system_prompt: str, messages: list, tools: list) -> 
                     args = json.loads(args_str) if args_str else {}
                 except (json.JSONDecodeError, ValueError):
                     args = {"raw": args_str}
-                tc_parts.append(
-                    json.dumps({"name": name, "input": args}, ensure_ascii=False)
-                )
+                tc_parts.append(_render_history_tool_call(name, args, client_profile))
             text = "\n".join(tc_parts)
 
         # Skip assistant messages that are just needs-review boilerplate
@@ -217,7 +243,11 @@ def build_prompt_with_tools(system_prompt: str, messages: list, tools: list) -> 
     if tools and messages:
         first_user = next((m for m in messages if m.get("role") == "user"), None)
         if first_user:
-            first_text = _extract_text(first_user.get("content", ""), user_tool_mode=True)
+            first_text = _extract_text(
+                first_user.get("content", ""),
+                user_tool_mode=(client_profile == CLAUDE_CODE_OPENAI_PROFILE),
+                client_profile=client_profile,
+            )
             first_short = first_text[:800] + ("...[原始任务截断]" if len(first_text) > 800 else "")
             first_line = f"Human: {first_short}"
             # Check if first user message is already at the start of history
@@ -235,7 +265,11 @@ def build_prompt_with_tools(system_prompt: str, messages: list, tools: list) -> 
     if tools and messages:
         latest_user = next((m for m in reversed(messages) if m.get("role") == "user"), None)
         if latest_user:
-            latest_text = _extract_text(latest_user.get("content", ""), user_tool_mode=True).strip()
+            latest_text = _extract_text(
+                latest_user.get("content", ""),
+                user_tool_mode=(client_profile == CLAUDE_CODE_OPENAI_PROFILE),
+                client_profile=client_profile,
+            ).strip()
             if latest_text:
                 latest_short = latest_text[:900] + ("...[最新任务截断]" if len(latest_text) > 900 else "")
                 latest_user_line = f"Human (CURRENT TASK - TOP PRIORITY): {latest_short}"
@@ -249,7 +283,11 @@ def build_prompt_with_tools(system_prompt: str, messages: list, tools: list) -> 
             first_user = next((m for m in messages if m.get("role") == "user"), None)
             if first_user:
                 first_user_preview = _safe_preview(
-                    _extract_text(first_user.get("content", ""), user_tool_mode=True),
+                    _extract_text(
+                        first_user.get("content", ""),
+                        user_tool_mode=(client_profile == CLAUDE_CODE_OPENAI_PROFILE),
+                        client_profile=client_profile,
+                    ),
                     220,
                 )
         log.info(
@@ -272,7 +310,7 @@ def build_prompt_with_tools(system_prompt: str, messages: list, tools: list) -> 
     return "\n\n".join(parts)
 
 
-def messages_to_prompt(req_data: dict) -> PromptBuildResult:
+def messages_to_prompt(req_data: dict, *, client_profile: str = OPENCLAW_OPENAI_PROFILE) -> PromptBuildResult:
     messages = req_data.get("messages", [])
     tools = _normalize_tools(req_data.get("tools", []))
     tool_enabled = bool(tools)
@@ -285,10 +323,10 @@ def messages_to_prompt(req_data: dict) -> PromptBuildResult:
     if not system_prompt:
         for msg in messages:
             if msg.get("role") == "system":
-                system_prompt = _extract_text(msg.get("content", ""))
+                system_prompt = _extract_text(msg.get("content", ""), client_profile=client_profile)
                 break
     return PromptBuildResult(
-        prompt=build_prompt_with_tools(system_prompt, messages, tools),
+        prompt=build_prompt_with_tools(system_prompt, messages, tools, client_profile=client_profile),
         tools=tools,
         tool_enabled=tool_enabled,
     )

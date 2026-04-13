@@ -12,6 +12,7 @@ class StandardRequest:
     response_model: str
     resolved_model: str
     surface: str
+    client_profile: str = "openclaw_openai"
     requested_model: str | None = None
     content: str | None = None
     stream: bool = False

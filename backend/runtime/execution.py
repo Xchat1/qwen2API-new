@@ -482,20 +482,32 @@ def evaluate_retry_directive(
 
     if state.blocked_tool_names and request.tools:
         blocked_name = normalize_tool_name_for_retry(state.blocked_tool_names[0], request.tool_names)
-        force_text = (
-            f"[MANDATORY NEXT STEP]: The server blocked tool '{blocked_name}' with 'Tool {blocked_name} does not exists.'. "
-            "Retry immediately using ONLY ##TOOL_CALL## format and nothing else:\n"
-            "##TOOL_CALL##\n"
-            f'{{"name": {json.dumps(blocked_name)}, "input": {{...your args here...}}}}\n'
-            "##END_CALL##\n"
-            "DO NOT use bare JSON. DO NOT use any XML tags. DO NOT add prose before or after the wrapper."
-        )
+        if request.client_profile == "claude_code_openai":
+            force_text = (
+                f"[MANDATORY NEXT STEP]: The server blocked tool '{blocked_name}' with 'Tool {blocked_name} does not exists.'. "
+                "Retry immediately using ONLY ##TOOL_CALL## format and nothing else:\n"
+                "##TOOL_CALL##\n"
+                f'{{"name": {json.dumps(blocked_name)}, "input": {{...your args here...}}}}\n'
+                "##END_CALL##\n"
+                "DO NOT use bare JSON. DO NOT use any XML tags. DO NOT add prose before or after the wrapper."
+            )
+        else:
+            force_text = (
+                f"[MANDATORY NEXT STEP]: The server blocked tool '{blocked_name}' with 'Tool {blocked_name} does not exists.'. "
+                "Retry immediately using ONLY a single XML tool call block and nothing else:\n"
+                f'<tool_call>{{"name": {json.dumps(blocked_name)}, "input": {{...your args here...}}}}</tool_call>\n'
+                "DO NOT use bare JSON. DO NOT use ##TOOL_CALL## wrappers. DO NOT add prose before or after the XML block."
+            )
         if state.emitted_visible_output and not allow_after_visible_output:
             next_prompt = inject_assistant_message(current_prompt, force_text)
             return RuntimeRetryDirective(retry=True, next_prompt=next_prompt)
         return RuntimeRetryDirective(
             retry=True,
-            next_prompt=tool_parser.inject_format_reminder(current_prompt, blocked_name),
+            next_prompt=tool_parser.inject_format_reminder(
+                current_prompt,
+                blocked_name,
+                client_profile=request.client_profile,
+            ),
         )
 
     if request.tools and state.answer_text:
