@@ -108,6 +108,13 @@ def _tool_param_hint(tool: dict) -> str:
     return f" input keys: {', '.join(shown)}{suffix}"
 
 
+def _safe_preview(text: str, limit: int = 240) -> str:
+    if not text:
+        return ""
+    compact = " ".join(text.split())
+    return compact[:limit] + ("...[truncated]" if len(compact) > limit else "")
+
+
 def build_prompt_with_tools(system_prompt: str, messages: list, tools: list) -> str:
     MAX_CHARS = 18000 if tools else 120000
     sys_part = f"<system>\n{system_prompt[:2000]}\n</system>" if system_prompt else ""
@@ -263,7 +270,27 @@ def build_prompt_with_tools(system_prompt: str, messages: list, tools: list) -> 
                 latest_user_line = f"Human (CURRENT TASK - TOP PRIORITY): {latest_short}"
 
     if tools:
-        log.info(f"[Prompt] 工具模式: {len(history_parts)} 条历史消息, {used}字 history + {len(tools_part)}字 tool指令")
+        tool_names = [tool.get("name", "") for tool in tools if tool.get("name")]
+        tool_instruction_preview = _safe_preview(tools_part, 360)
+        latest_user_preview = _safe_preview(latest_user_line, 220)
+        first_user_preview = ""
+        if messages:
+            first_user = next((m for m in messages if m.get("role") == "user"), None)
+            if first_user:
+                first_user_preview = _safe_preview(
+                    _extract_text(first_user.get("content", ""), user_tool_mode=True),
+                    220,
+                )
+        log.info(
+            "[Prompt] 工具模式: history_msgs=%s history_chars=%s tool_count=%s tool_names=%s first_user=%r latest_user=%r tool_instr=%r",
+            len(history_parts),
+            used,
+            len(tool_names),
+            tool_names[:12],
+            first_user_preview,
+            latest_user_preview,
+            tool_instruction_preview,
+        )
     parts = []
     if sys_part: parts.append(sys_part)
     parts.extend(history_parts)

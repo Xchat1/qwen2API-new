@@ -28,6 +28,9 @@ class RuntimeAttemptState:
     raw_events: list[dict[str, Any]] = field(default_factory=list)
     emitted_visible_output: bool = False
     stage_metrics: dict[str, float] = field(default_factory=dict)
+    first_answer_preview: str = ""
+    first_reasoning_preview: str = ""
+    first_tool_call_preview: str = ""
 
 
 @dataclass(slots=True)
@@ -91,6 +94,13 @@ class RuntimeAttemptCursor:
 
 
 TRAILING_IDLE_AFTER_TOOL_SECONDS = 2.0
+
+
+def _preview_text(text: str, limit: int = 240) -> str:
+    if not text:
+        return ""
+    compact = " ".join(str(text).split())
+    return compact[:limit] + ("...[truncated]" if len(compact) > limit else "")
 
 
 __all__ = [
@@ -257,6 +267,9 @@ async def collect_completion_run(
     answer_fragments: list[str] = []
     reasoning_fragments: list[str] = []
     native_tool_calls: list[dict[str, Any]] = []
+    first_answer_preview = ""
+    first_reasoning_preview = ""
+    first_tool_call_preview = ""
     tool_state = StreamingToolCallState()
     emitted_visible_output = False
     raw_events: list[dict[str, Any]] = []
@@ -288,6 +301,10 @@ async def collect_completion_run(
 
         if phase in ("think", "thinking_summary") and content:
             reasoning_fragments.append(content)
+            if not first_reasoning_preview:
+                first_reasoning_preview = _preview_text(content)
+                if request.tools:
+                    log.info("[Runtime] first_reasoning_delta=%r", first_reasoning_preview)
             emitted_visible_output = True
             if not first_event_marked:
                 metrics.mark("first_event", float(len(raw_events)))
@@ -298,6 +315,10 @@ async def collect_completion_run(
 
         if phase == "answer" and content:
             answer_fragments.append(content)
+            if not first_answer_preview:
+                first_answer_preview = _preview_text(content)
+                if request.tools:
+                    log.info("[Runtime] first_answer_delta=%r", first_answer_preview)
             emitted_visible_output = True
             if not first_event_marked:
                 metrics.mark("first_event", float(len(raw_events)))
@@ -314,6 +335,10 @@ async def collect_completion_run(
             completed_calls = tool_state.process_event(evt)
             if completed_calls:
                 native_tool_calls.extend(completed_calls)
+                if not first_tool_call_preview:
+                    first_tool_call_preview = _preview_text(json.dumps(completed_calls[0], ensure_ascii=False), 320)
+                    if request.tools:
+                        log.info("[Runtime] first_native_tool_call=%r", first_tool_call_preview)
                 if on_delta is not None:
                     await on_delta(evt, None, completed_calls)
 
@@ -331,13 +356,19 @@ async def collect_completion_run(
         raw_events=raw_events,
         emitted_visible_output=emitted_visible_output,
         stage_metrics=metrics.summary(),
+        first_answer_preview=first_answer_preview,
+        first_reasoning_preview=first_reasoning_preview,
+        first_tool_call_preview=first_tool_call_preview,
     )
     if request.tools:
         log.info(
-            "[Runtime] finish=%s native_tool_calls=%s blocked=%s answer_preview=%r",
+            "[Runtime] finish=%s native_tool_calls=%s blocked=%s first_answer=%r first_reasoning=%r first_tool=%r answer_preview=%r",
             state.finish_reason,
             native_tool_calls,
             state.blocked_tool_names,
+            state.first_answer_preview,
+            state.first_reasoning_preview,
+            state.first_tool_call_preview,
             answer_text[:300],
         )
     return RuntimeExecutionResult(state=state, chat_id=chat_id, acc=acc)

@@ -76,7 +76,15 @@ async def chat_completions(request: Request):
     created = int(time.time())
 
     with request_context(req_id=new_request_id(), surface="openai", requested_model=model_name, resolved_model=qwen_model):
-        log.info(f"[OAI] model={qwen_model}, stream={standard_request.stream}, tool_enabled={standard_request.tool_enabled}, tools={[t.get('name') for t in tools]}, prompt_len={len(prompt)}")
+        log.info(
+            "[OAI] model=%s stream=%s tool_enabled=%s tools=%s prompt_len=%s prompt_tail=%r",
+            qwen_model,
+            standard_request.stream,
+            standard_request.tool_enabled,
+            [t.get('name') for t in tools],
+            len(prompt),
+            prompt[-500:],
+        )
 
         if standard_request.stream:
             async def generate():
