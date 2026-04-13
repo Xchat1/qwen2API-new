@@ -72,12 +72,51 @@ def _extract_first_xml_tool_call(text: str) -> str | None:
     return None
 
 
+def _extract_first_json_tool_call(text: str) -> str | None:
+    normalized = text.strip()
+    markers = [
+        '<tool_call>{"name"',
+        '<tool_calls><tool_call>{"name"',
+        '{"name"',
+        '"name":',
+        '"name="',
+        'function.name:',
+    ]
+    start_positions = [normalized.find(marker) for marker in markers if normalized.find(marker) != -1]
+    if not start_positions:
+        return None
+    start = min(start_positions)
+    candidate = normalized[start:]
+
+    wrapped_match = re.search(r"<tool_calls>\s*(<tool_call>[\s\S]*?</tool_call>)\s*</tool_calls>", candidate, re.IGNORECASE)
+    if wrapped_match:
+        return wrapped_match.group(1)
+
+    tool_call_match = re.search(r"<tool_call>\s*(\{[\s\S]*?\}|[\s\S]*?)\s*</tool_call>", candidate, re.IGNORECASE)
+    if tool_call_match:
+        return tool_call_match.group(0)
+
+    json_start = candidate.find("{")
+    if json_start == -1:
+        return None
+    depth = 0
+    for idx in range(json_start, len(candidate)):
+        ch = candidate[idx]
+        if ch == "{":
+            depth += 1
+        elif ch == "}":
+            depth -= 1
+            if depth == 0:
+                return candidate[json_start:idx + 1]
+    return candidate[json_start:]
+
+
 def _normalize_fragmented_tool_call(answer: str) -> str:
     text = answer.strip()
     if "##TOOL_CALL##" in text and "##END_CALL##" in text:
         return text
 
-    extracted_tool_call = _extract_first_xml_tool_call(text)
+    extracted_tool_call = _extract_first_xml_tool_call(text) or _extract_first_json_tool_call(text)
     if extracted_tool_call:
         return extracted_tool_call
 
@@ -86,7 +125,7 @@ def _normalize_fragmented_tool_call(answer: str) -> str:
     text = re.sub(r"Tool\s+[A-Za-z0-9_.:-]*\s*does not exists?\\.?", "", text, flags=re.IGNORECASE)
     text = re.sub(r"```[\s\S]*?```", "", text)
 
-    extracted_tool_call = _extract_first_xml_tool_call(text)
+    extracted_tool_call = _extract_first_xml_tool_call(text) or _extract_first_json_tool_call(text)
     if extracted_tool_call:
         return extracted_tool_call
 
