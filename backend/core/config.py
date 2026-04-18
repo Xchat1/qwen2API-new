@@ -3,6 +3,7 @@ import json
 from pathlib import Path
 from pydantic_settings import BaseSettings
 from typing import Dict, Set
+from pydantic_settings import SettingsConfigDict
 
 BASE_DIR = Path(__file__).resolve().parent.parent.parent
 DATA_DIR = BASE_DIR / "data"
@@ -29,6 +30,9 @@ class Settings(BaseSettings):
 
     # 日志
     LOG_LEVEL: str = os.getenv("LOG_LEVEL", "INFO")
+    QWEN_CODE_CODER_MODEL: str = os.getenv("QWEN_CODE_CODER_MODEL", "qwen3-coder-plus")
+    QWEN_CODE_FORCE_CODER_FOR_TOOL_CALLS: bool = os.getenv("QWEN_CODE_FORCE_CODER_FOR_TOOL_CALLS", "true").lower() in {"1", "true", "yes", "on"}
+    QWEN_CODE_FORCE_CODER_FOR_CODING_TASKS: bool = os.getenv("QWEN_CODE_FORCE_CODER_FOR_CODING_TASKS", "true").lower() in {"1", "true", "yes", "on"}
 
     # 数据文件路径
     ACCOUNTS_FILE: str = os.getenv("ACCOUNTS_FILE", str(DATA_DIR / "accounts.json"))
@@ -48,8 +52,7 @@ class Settings(BaseSettings):
     CONTEXT_ALLOWED_GENERATED_EXTS: str = os.getenv("CONTEXT_ALLOWED_GENERATED_EXTS", "txt,md,json,log")
     CONTEXT_ALLOWED_USER_EXTS: str = os.getenv("CONTEXT_ALLOWED_USER_EXTS", "txt,md,json,log,xml,yaml,yml,csv,html,css,py,js,ts,java,c,cpp,cs,php,go,rb,sh,zsh,ps1,bat,cmd,pdf,doc,docx,ppt,pptx,xls,xlsx,png,jpg,jpeg,webp,gif,tiff,bmp,svg")
 
-    class Config:
-        env_file = ".env"
+    model_config = SettingsConfigDict(env_file=".env", extra="ignore")
 
 API_KEYS_FILE = DATA_DIR / "api_keys.json"
 
@@ -75,8 +78,8 @@ VERSION = "2.0.0"
 
 settings = Settings()
 
-# 全局映射
-MODEL_MAP = {
+# 默认全局映射
+DEFAULT_MODEL_MAP = {
     # OpenAI
     "gpt-4o":            "qwen3.6-plus",
     "gpt-4o-mini":       "qwen3.5-flash",
@@ -86,6 +89,8 @@ MODEL_MAP = {
     "gpt-4.1-mini":      "qwen3.5-flash",
     "gpt-3.5-turbo":     "qwen3.5-flash",
     "gpt-5":             "qwen3.6-plus",
+    "gpt-5.4":           "qwen3.6-plus",
+    "gpt5.4":            "qwen3.6-plus",
     "o1":                "qwen3.6-plus",
     "o1-mini":           "qwen3.5-flash",
     "o3":                "qwen3.6-plus",
@@ -104,11 +109,118 @@ MODEL_MAP = {
     "qwen":              "qwen3.6-plus",
     "qwen-max":          "qwen3.6-plus",
     "qwen-plus":         "qwen3.6-plus",
+    "qwen3.6plus":       "qwen3.6-plus",
     "qwen-turbo":        "qwen3.5-flash",
+    "qwen-code":         "qwen3-coder-plus",
+    "qwen-code-plus":    "qwen3-coder-plus",
+    "qwen-coder":        "qwen3-coder-plus",
+    "qwen3-coder":       "qwen3-coder-plus",
+    "qwen3-coder-plus":  "qwen3-coder-plus",
     # DeepSeek
     "deepseek-chat":     "qwen3.6-plus",
     "deepseek-reasoner": "qwen3.6-plus",
 }
 
+def load_runtime_config() -> dict:
+    config_path = Path(settings.CONFIG_FILE)
+    if not config_path.exists():
+        return {}
+    try:
+        with open(config_path, "r", encoding="utf-8") as f:
+            data = json.load(f)
+        return data if isinstance(data, dict) else {}
+    except Exception:
+        return {}
+
+
+def save_runtime_config(*, max_inflight_per_account: int | None = None, model_aliases: dict[str, str] | None = None) -> dict:
+    config_path = Path(settings.CONFIG_FILE)
+    config_path.parent.mkdir(parents=True, exist_ok=True)
+
+    current = load_runtime_config()
+    if max_inflight_per_account is not None:
+        current["max_inflight_per_account"] = int(max_inflight_per_account)
+    if model_aliases is not None:
+        current["model_aliases"] = dict(model_aliases)
+
+    with open(config_path, "w", encoding="utf-8") as f:
+        json.dump(current, f, ensure_ascii=False, indent=2)
+    return current
+
+
+MODEL_MAP = dict(DEFAULT_MODEL_MAP)
+runtime_config = load_runtime_config()
+if isinstance(runtime_config.get("model_aliases"), dict):
+    MODEL_MAP.update(runtime_config["model_aliases"])
+if runtime_config.get("max_inflight_per_account") is not None:
+    settings.MAX_INFLIGHT_PER_ACCOUNT = int(runtime_config["max_inflight_per_account"])
+
 def resolve_model(name: str) -> str:
     return MODEL_MAP.get(name, name)
+
+
+GENERIC_QWEN_CODE_MODELS = {
+    "qwen3.6-plus",
+    "qwen-plus",
+    "qwen-max",
+    "qwen",
+}
+
+
+def resolve_qwen_code_model(name: str) -> str:
+    return resolve_model(settings.QWEN_CODE_CODER_MODEL or name)
+
+
+def _normalized_model_name(name: str | None) -> str:
+    return str(name or "").strip().lower()
+
+
+def _looks_like_coder_model(name: str | None) -> bool:
+    normalized = _normalized_model_name(name)
+    return "coder" in normalized or normalized.startswith("qwen-code")
+
+
+def _is_explicit_non_coder_model(name: str | None) -> bool:
+    normalized = _normalized_model_name(name)
+    return any(marker in normalized for marker in ("flash", "mini", "turbo"))
+
+
+def should_route_qwen_code_to_coder(
+    requested_model: str,
+    *,
+    client_profile: str,
+    tool_enabled: bool = False,
+    coding_intent: bool = False,
+) -> bool:
+    if client_profile != "qwen_code_openai":
+        return False
+    if _looks_like_coder_model(requested_model):
+        return False
+    resolved_model = resolve_model(requested_model)
+    if _looks_like_coder_model(resolved_model):
+        return False
+    if _is_explicit_non_coder_model(requested_model):
+        return False
+
+    if tool_enabled and settings.QWEN_CODE_FORCE_CODER_FOR_TOOL_CALLS and resolved_model in GENERIC_QWEN_CODE_MODELS:
+        return True
+    if coding_intent and settings.QWEN_CODE_FORCE_CODER_FOR_CODING_TASKS and resolved_model in GENERIC_QWEN_CODE_MODELS:
+        return True
+    return False
+
+
+def resolve_request_model(
+    requested_model: str,
+    *,
+    client_profile: str,
+    tool_enabled: bool = False,
+    coding_intent: bool = False,
+) -> str:
+    if should_route_qwen_code_to_coder(
+        requested_model,
+        client_profile=client_profile,
+        tool_enabled=tool_enabled,
+        coding_intent=coding_intent,
+    ):
+        return resolve_qwen_code_model(requested_model)
+    return resolve_model(requested_model)
