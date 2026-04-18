@@ -3,7 +3,6 @@ import json
 from pathlib import Path
 from pydantic_settings import BaseSettings
 from typing import Dict, Set
-from pydantic_settings import SettingsConfigDict
 
 BASE_DIR = Path(__file__).resolve().parent.parent.parent
 DATA_DIR = BASE_DIR / "data"
@@ -52,7 +51,8 @@ class Settings(BaseSettings):
     CONTEXT_ALLOWED_GENERATED_EXTS: str = os.getenv("CONTEXT_ALLOWED_GENERATED_EXTS", "txt,md,json,log")
     CONTEXT_ALLOWED_USER_EXTS: str = os.getenv("CONTEXT_ALLOWED_USER_EXTS", "txt,md,json,log,xml,yaml,yml,csv,html,css,py,js,ts,java,c,cpp,cs,php,go,rb,sh,zsh,ps1,bat,cmd,pdf,doc,docx,ppt,pptx,xls,xlsx,png,jpg,jpeg,webp,gif,tiff,bmp,svg")
 
-    model_config = SettingsConfigDict(env_file=".env", extra="ignore")
+    class Config:
+        env_file = ".env"
 
 API_KEYS_FILE = DATA_DIR / "api_keys.json"
 
@@ -78,8 +78,8 @@ VERSION = "2.0.0"
 
 settings = Settings()
 
-# 默认全局映射
-DEFAULT_MODEL_MAP = {
+# 全局映射
+MODEL_MAP = {
     # OpenAI
     "gpt-4o":            "qwen3.6-plus",
     "gpt-4o-mini":       "qwen3.5-flash",
@@ -89,8 +89,6 @@ DEFAULT_MODEL_MAP = {
     "gpt-4.1-mini":      "qwen3.5-flash",
     "gpt-3.5-turbo":     "qwen3.5-flash",
     "gpt-5":             "qwen3.6-plus",
-    "gpt-5.4":           "qwen3.6-plus",
-    "gpt5.4":            "qwen3.6-plus",
     "o1":                "qwen3.6-plus",
     "o1-mini":           "qwen3.5-flash",
     "o3":                "qwen3.6-plus",
@@ -109,51 +107,11 @@ DEFAULT_MODEL_MAP = {
     "qwen":              "qwen3.6-plus",
     "qwen-max":          "qwen3.6-plus",
     "qwen-plus":         "qwen3.6-plus",
-    "qwen3.6plus":       "qwen3.6-plus",
     "qwen-turbo":        "qwen3.5-flash",
-    "qwen-code":         "qwen3-coder-plus",
-    "qwen-code-plus":    "qwen3-coder-plus",
-    "qwen-coder":        "qwen3-coder-plus",
-    "qwen3-coder":       "qwen3-coder-plus",
-    "qwen3-coder-plus":  "qwen3-coder-plus",
     # DeepSeek
     "deepseek-chat":     "qwen3.6-plus",
     "deepseek-reasoner": "qwen3.6-plus",
 }
-
-def load_runtime_config() -> dict:
-    config_path = Path(settings.CONFIG_FILE)
-    if not config_path.exists():
-        return {}
-    try:
-        with open(config_path, "r", encoding="utf-8") as f:
-            data = json.load(f)
-        return data if isinstance(data, dict) else {}
-    except Exception:
-        return {}
-
-
-def save_runtime_config(*, max_inflight_per_account: int | None = None, model_aliases: dict[str, str] | None = None) -> dict:
-    config_path = Path(settings.CONFIG_FILE)
-    config_path.parent.mkdir(parents=True, exist_ok=True)
-
-    current = load_runtime_config()
-    if max_inflight_per_account is not None:
-        current["max_inflight_per_account"] = int(max_inflight_per_account)
-    if model_aliases is not None:
-        current["model_aliases"] = dict(model_aliases)
-
-    with open(config_path, "w", encoding="utf-8") as f:
-        json.dump(current, f, ensure_ascii=False, indent=2)
-    return current
-
-
-MODEL_MAP = dict(DEFAULT_MODEL_MAP)
-runtime_config = load_runtime_config()
-if isinstance(runtime_config.get("model_aliases"), dict):
-    MODEL_MAP.update(runtime_config["model_aliases"])
-if runtime_config.get("max_inflight_per_account") is not None:
-    settings.MAX_INFLIGHT_PER_ACCOUNT = int(runtime_config["max_inflight_per_account"])
 
 def resolve_model(name: str) -> str:
     return MODEL_MAP.get(name, name)
